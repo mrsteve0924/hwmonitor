@@ -1,0 +1,160 @@
+#!/bin/bash
+# chatgpt optimized version of my original script.  doesnt use inxi or sed or cut or grep or any other sub process 
+
+source colors
+
+STATE_FILE="/tmp/panel_cpu_state"
+
+echo -e "${bold}PC${off}"
+
+# ----------------------------
+# DETECT HWMON DEVICES
+# ----------------------------
+HW_CPU=""
+HW_MB=""
+
+for hw in /sys/class/hwmon/hwmon*; do
+    name=$(cat "$hw/name" 2>/dev/null)
+
+    case "$name" in
+        k10temp|coretemp)
+            HW_CPU="$hw"
+            ;;
+        nct*|it87*)
+            HW_MB="$hw"
+            ;;
+    esac
+done
+
+# ----------------------------
+# CPU FREQUENCY (MHz)
+# ----------------------------
+cpu_mhz=0
+count=0
+for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; do
+    [ -f "$f" ] || continue
+    val=$(<"$f")
+    cpu_mhz=$((cpu_mhz + val))
+    count=$((count + 1))
+done
+
+[ "$count" -gt 0 ] && cpu_mhz=$((cpu_mhz / count / 1000)) || cpu_mhz="N/A"
+
+# ----------------------------
+# CPU UTIL (NO SLEEP)
+# ----------------------------
+read -r _ user nice system idle iowait irq softirq steal _ < /proc/stat
+total=$((user + nice + system + idle + iowait + irq + softirq + steal))
+
+if [ -f "$STATE_FILE" ]; then
+    read -r prev_total prev_idle < "$STATE_FILE"
+
+    diff_total=$((total - prev_total))
+    diff_idle=$((idle - prev_idle))
+
+    if [ "$diff_total" -gt 0 ]; then
+        util=$(( (10000 * (diff_total - diff_idle)) / diff_total ))
+    else
+        util=0
+    fi
+else
+    util=0
+fi
+
+echo "$total $idle" > "$STATE_FILE"
+
+util_int=$((util / 100))
+util_frac=$((util % 100))
+
+# ----------------------------
+# CPU TEMP (real sensor)
+# ----------------------------
+cpu_temp="N/A"
+
+if [ -n "$HW_CPU" ]; then
+    for t in "$HW_CPU"/temp*_input; do
+        label_file="${t%_input}_label"
+
+        if [ -f "$label_file" ]; then
+            label=$(cat "$label_file")
+
+            if [[ "$label" == "Package id 0" ]]; then
+                val=$(<"$t")
+                cpu_temp_int=$((val / 1000))
+                cpu_temp_frac=$(((val % 1000) / 100))
+                cpu_temp="${cpu_temp_int}.${cpu_temp_frac}"
+                break
+            fi
+        fi
+    done
+fi
+
+# ----------------------------
+# PRINT CPU LINE
+# ----------------------------
+printf "cpu:%s MHz  temp:%s°C  util:%d.%02d%%\n" \
+    "$cpu_mhz" "$cpu_temp" "$util_int" "$util_frac"
+
+# ----------------------------
+# FANS (motherboard chip)
+# ----------------------------
+fan1_val="N/A"
+fan5_val="N/A"
+
+if [ -n "$HW_MB" ]; then
+    [ -f "$HW_MB/fan1_input" ] && fan1_val=$(<"$HW_MB/fan1_input")
+    [ -f "$HW_MB/fan5_input" ] && fan5_val=$(<"$HW_MB/fan5_input")
+fi
+
+printf "fan1: %s RPM  fan5: %s RPM\n" "$fan1_val" "$fan5_val"
+
+# ----------------------------
+# GPU TEMP + FAN
+# ----------------------------
+gpu_temp=""
+gpu_fan=""
+
+HAS_NVIDIA_SMI=0
+command -v nvidia-smi >/dev/null 2>&1 && HAS_NVIDIA_SMI=1
+
+# Fast path: sysfs
+for card in /sys/class/drm/card*/device/hwmon/hwmon*; do
+    [ -f "$card/name" ] || continue
+    name=$(cat "$card/name")
+
+    case "$name" in
+        amdgpu|nouveau|nvidia)
+            [ -f "$card/temp1_input" ] && \
+                gpu_temp="$(( $(<"$card/temp1_input") / 1000 ))°C"
+
+            [ -f "$card/fan1_input" ] && \
+                gpu_fan="$(<"$card/fan1_input") RPM"
+
+            ;;
+    esac
+
+    [[ -n "$gpu_temp" || -n "$gpu_fan" ]] && break
+done
+
+# Fallback: NVIDIA
+if [[ "$HAS_NVIDIA_SMI" -eq 1 ]]; then
+    IFS=',' read -r temp fan util clock <<< "$(nvidia-smi \
+        --query-gpu=temperature.gpu,fan.speed,utilization.gpu,clocks.current.graphics \
+        --format=csv,noheader,nounits 2>/dev/null)"
+
+    temp="${temp// /}"
+    fan="${fan// /}"
+    util="${util// /}"
+    clock="${clock// /}"
+
+    [[ -n "$temp" ]] && gpu_temp="${temp}°C"
+    [[ -n "$fan" ]] && gpu_fan="${fan}%"
+    [[ -n "$util" ]] && gpu_util="${util}%"
+    [[ -n "$clock" ]] && gpu_clock="${clock}MHz"
+fi
+
+printf "GPU Tmp:%s  Fan:%s  Util:%s  Clk:%s\n" \
+    "${gpu_temp:-N/A}" \
+    "${gpu_fan:-N/A}" \
+    "${gpu_util:-N/A}" \
+    "${gpu_clock:-N/A}"
