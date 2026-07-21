@@ -1,5 +1,6 @@
 ## hwmonitor
-Displays CPU &amp; GPU speeds, temps, fan speed, utilization 
+Displays CPU &amp; GPU speeds, temps, fan speed, utilization   
+Optimized to not use inxi or sed or cut or grep or any other sub processes   
 
 Use with "watch -ct hwmonitor" to dynamically monitor
 
